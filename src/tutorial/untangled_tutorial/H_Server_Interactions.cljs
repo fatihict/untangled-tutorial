@@ -28,7 +28,73 @@
 
   ## Reads
 
-  Remote reads in Untangled are explicit. There is no Om parser to write on the client side.
+  Remote reads in Untangled are explicit calls to the load functions in the `untangled.client.data-fetch` namespace, of
+  which there are two pairs:
+
+  1. `load-data` and `load-data-action`
+  2. `load-field` and `load-field-action`
+
+  ### Load Data vs. Load Field
+
+  Both of these function families are calls to the built-in `untangled/load` mutation, so requests made by either function
+  go through the same networking layer and have the same customizations through their named parameters. The only difference
+  is that `load-data` must be passed a complete query while `load-field` uses the passed-in component to create its query.
+  The following two loads are equivalent:
+
+  ```
+  (defui Person
+    static om/IQuery (query [this] [:db/id :name :age])
+    static om/Ident (ident [this props] [:person/by-id (:db/id props)])
+    Object
+    (render [this]
+      (dom/div #js {:onClick #(df/load-field this :age)})
+      (dom/div #js {:onClick #(df/load-data this [:age]
+                                :ident (om/get-ident this) :refresh [(om/get-ident this)])}))
+  ```
+
+  So, `load-field` focuses the component's query to the specified field, associates the component's ident with the query,
+  and asks the UI to re-render all components with the component's ident after the load is complete. Since `load-field` requires
+  a component to build the query sent to the server, it cannot be used with the reconciler. If you want to load data
+  from your server when the app initially loads, you must use `load-data` with the reconciler passed to the
+  `:started-callback` function when creating a new untangled client application.
+
+  ### Load vs. Load-Action
+
+  The non action-suffixed function of each pair calls `om/transact!` under the hood to the built-in untangled mutation called
+  `untangled/load`, which is responsible for sending your request to the server. The action-suffixed function of each pair
+  **does not** call `om/transact!`, and is used to initialize a load inside of one of your custom client-side mutations
+  that you would like to happen just before the data is loaded. Each action-suffixed load function must be used in
+  conjunction with `untangled.client.data-fetch/remote-load`, which converts the remote mutation key for your mutation
+  to the `untangled/load` key.
+
+  Let's look at an example. Say you want to load a list of people from the server:
+  ```
+  (require [untangled.client.data-fetch :as df])
+
+  (defui Person ... )
+  (def ui-person (om/factory Person))
+
+  (defui PeopleList
+    static om/IQuery (query [this] [:db/id :list-title {:people (om/get-query Person}]
+    static om/Ident (ident [this props] [:people-list/by-id (:db/id props)])
+    Object
+    (render [this]
+      (let [{:keys [people]} (om/props this)]
+        ;; people starts out as nil
+        (dom/div nil
+          (df/lazily-loaded #(map ui-person %) people
+            :not-present-render #(dom/button #js {:onClick #(df/load-field this :people)}
+                                   \"Load People\"))))))
+  ```
+
+  Since we are in the UI and not inside of a mutation's action thunk, we want to use `load-field` to initialize the
+  call to `om/transact!`. The use of `lazily-loaded` above will show a button to load people when `people` is `nil`
+  (for example, when the app initially loads), and will render each person in the list of people once the button is
+  clicked and the data has been loaded.
+
+  TODO: What if we want to load data when we switch to a new view? Then we have to change the view AND load data
+  to show it. We don't want to put loads in lifecycle methods (link to ref guide), so we have to integrate the UI
+  switch somehow with the data loading process.
 
   ### UI attributes
 
@@ -43,7 +109,7 @@
   it component local), then you have a problem when that component is composed into another component that
   is to be used when generating a server query. You don't want the UI-specific attributes to *go* to the server!
 
-  Untangled handles this for you. Any attributes in you component queries that are namespaced to `ui` are automatically
+  Untangled handles this for you. Any attributes in your component queries that are namespaced to `ui` are automatically
   (and recursively) stripped from queries before they are sent to the server. There is nothing for you to do except
   namespace these local-only attributes in the queries! (Additionally, there are local mutation
   helpers that can be used to update these without writing custom mutation code. See the section on Mutation)
@@ -73,7 +139,7 @@
   - However, if you do it, Untangled merges with the following rules:
       - If the query *asks* for an attribute, and the *response does not include it*, then it is always removed from the app state since the
       server has clearly indicated it is gone.
-      - The the query *does not ask* for an attribute (which means the response cannot possibly contain it), then Untangled
+      - If the query *does not ask* for an attribute (which means the response cannot possibly contain it), then Untangled
       will avoid removing it, even if other attributes come back (e.g. it will be a merge leaving the property that was
       not asked for alone). This does indicate that your UI is possibly in a state inconsistent with the server, which
       is the reason for the \"avoid this case\" advice.
@@ -98,6 +164,9 @@
   ## Mutations
 
   ### Optimistic (client) changes
+
+  NOTE: Om action thunks are executed BEFORE the remote read, so if you want to delete data from the client that you
+  need to pass to the server, you will have to keep track of that state before removing it permanently.
 
   TODO: Just like Om
 
@@ -139,7 +208,7 @@
   ## Differences from stock Om (Next)
 
   For those that are used to Om, you may be interested in the differences and rationale behind the way Untangled
-  handles server interactions, particularly remote reads.
+  handles server interactions, particularly remote reads. There is no Om parser to do remote reads on the client side.
 
   In Om, you have a fully customizable experience for reads/writes; however, to get this power you must write
   a parser to process the queries and mutations, including analyzing application state to figure out when to talk
